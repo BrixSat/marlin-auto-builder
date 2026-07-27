@@ -39,7 +39,7 @@ jobs:
       version:  ${{ steps.ver.outputs.version }}
       is_new:   ${{ steps.ver.outputs.is_new }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - id: list
         name: Discover printers
@@ -78,7 +78,7 @@ jobs:
       matrix:
         printer: ${{ fromJson(needs.setup.outputs.printers) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
