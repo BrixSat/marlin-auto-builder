@@ -1,0 +1,114 @@
+name: Build firmware
+
+# Builds every printer under printers/ and publishes the .hex files.
+#
+# Triggers:
+#   - workflow_dispatch : manual run (choose a Marlin version)
+#   - schedule          : daily check — if Marlin has a NEW release, build & publish
+#   - push              : validate builds when configs or the script change
+#
+# Requires nothing but a pushed repo with Actions enabled. Releases are created
+# in THIS repo, tagged "marlin-<version>", with all firmware .hex attached.
+
+on:
+  workflow_dispatch:
+    inputs:
+      marlin_version:
+        description: 'Marlin version tag, or "latest"'
+        default: 'latest'
+      publish_release:
+        description: 'Publish a GitHub Release with the .hex files'
+        type: boolean
+        default: true
+  schedule:
+    - cron: '0 6 * * *'          # every day 06:00 UTC
+  push:
+    paths:
+      - 'printers/**'
+      - 'build.sh'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: write                # needed to create Releases
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      printers: ${{ steps.list.outputs.printers }}
+      version:  ${{ steps.ver.outputs.version }}
+      is_new:   ${{ steps.ver.outputs.is_new }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: list
+        name: Discover printers
+        run: |
+          printers=$(ls -d printers/*/ | xargs -n1 basename | jq -R . | jq -sc .)
+          echo "printers=$printers" >> "$GITHUB_OUTPUT"
+          echo "Found: $printers"
+
+      - id: ver
+        name: Resolve Marlin version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          req="${{ github.event.inputs.marlin_version }}"
+          if [ -z "$req" ] || [ "$req" = "latest" ]; then
+            ver=$(curl -fsSL https://api.github.com/repos/MarlinFirmware/Marlin/releases/latest | jq -r .tag_name)
+          else
+            ver="$req"
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "Marlin version: $ver"
+          # Have we already released firmware for this Marlin version?
+          if gh release view "marlin-$ver" >/dev/null 2>&1; then
+            echo "is_new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: setup
+    # On the daily schedule, only build when Marlin has a genuinely new release.
+    if: ${{ github.event_name != 'schedule' || needs.setup.outputs.is_new == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        printer: ${{ fromJson(needs.setup.outputs.printers) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+      - name: Build ${{ matrix.printer }}
+        run: ./build.sh "${{ matrix.printer }}" --version "${{ needs.setup.outputs.version }}"
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.printer }}-${{ needs.setup.outputs.version }}
+          path: output/${{ matrix.printer }}-${{ needs.setup.outputs.version }}-*.hex
+          if-no-files-found: error
+
+  release:
+    needs: [setup, build]
+    # Publish for manual/scheduled runs (not plain pushes) when the version is new.
+    if: ${{ github.event_name != 'push' && needs.setup.outputs.is_new == 'true' && (github.event.inputs.publish_release != 'false') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "marlin-${{ needs.setup.outputs.version }}" \
+            dist/*.hex \
+            --repo "${{ github.repository }}" \
+            --title "Firmware — Marlin ${{ needs.setup.outputs.version }}" \
+            --notes "Auto-built firmware for all printers against Marlin ${{ needs.setup.outputs.version }}."

@@ -1,0 +1,4 @@
+# transient build + download artifacts
+.cache/
+.build/
+output/
